@@ -3,9 +3,17 @@
   "version": "0.1.0",
   "description": "Fail-closed allergen checks for recipes and packaged foods (EU 14 + US Big 9). Never says 'safe'.",
   "type": "module",
-  "exports": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "scripts": {
-    "test": "node --experimental-strip-types --test test/*.ts"
+    "build": "tsc",
+    "prepare": "tsc",
+    "test": "node --experimental-strip-types --test test/*.ts",
+    "typecheck": "tsc --noEmit"
   },
   "license": "MIT",
   "engines": {
@@ -17,5 +25,19 @@
     "food",
     "open-food-facts",
     "fail-closed"
-  ]
+  ],
+  "files": [
+    "dist",
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Quillrun/allergen-guard"
+  }
 }
