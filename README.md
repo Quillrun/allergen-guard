@@ -36,6 +36,6 @@ Not medical advice. Always check the label.
 
 MIT licensed. The bench data is not: it is Open Food Facts data under the Open Database License (ODbL) 1.0, as set out under "Data licence" in [`bench/README.md`](bench/README.md).
 
-This repository is the canonical copy of the engine; the Allergy Crosscheck application vendors it under `packages/allergen-guard`.
+This repository is the published copy of the engine. It is developed inside the Allergy Crosscheck application, under `packages/allergen-guard`, and synced here, so the commit hashes in `bench/README.md` refer to the application repository (https://github.com/Quillrun/allergy-crosscheck).
 
 It is the engine behind [Allergy Crosscheck](https://devpost.com/software/allergy-crosscheck), an Alexa+ add-on built for the Build, Ship, Shape: Amazon Developer Hackathon (October 2026). The `bench/` folder holds the Open Food Facts measurement and its hand checks.
