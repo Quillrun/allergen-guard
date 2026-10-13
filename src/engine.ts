@@ -44,12 +44,27 @@ const hasSoyFreeMiso = (line: string) => {
   return bracket !== undefined && !/\b(?:soy|soya|soja|soyabeans?|soybeans?|edamame)\b/i.test(bracket);
 };
 
+// Glued spellings ("brazilnuts", "milkpowder", "sesameseeds") are split into the words the catalogue knows before matching, so the terms still apply.
+// Only a word that is neither known nor a term word is split, and only into words that are known or in a term; one part must be in a term.
+const termWord = (w: string) => TERM_WORDS.has(w) || TERM_WORDS.has(w.replace(/es$/, "")) || TERM_WORDS.has(w.replace(/s$/, "")) || TERM_WORDS.has(w.replace(/ies$/, "y"));
+const wordOf = (w: string) => w.length >= 3 && (termWord(w) || (w.length >= 4 && known(w)));
+function splitGlued(w: string, depth = 0): string[] | null {
+  for (let i = w.length - 3; i >= 3; i--) {
+    const [a, b] = [w.slice(0, i), w.slice(i)];
+    if (!wordOf(a)) continue;
+    const rest = wordOf(b) ? [b] : depth < 2 ? splitGlued(b, depth + 1) : null;
+    if (rest && [a, ...rest].some(termWord)) return [a, ...rest];
+  }
+  return null;
+}
+const deglue = (text: string) => text.split(" ").map((w) => (w.length >= 6 && /^[a-z]+$/.test(w) && !wordOf(w) ? (splitGlued(w) ?? [w]).join(" ") : w)).join(" ");
+
 /** Find allergen hits in one ingredient line ("2 tbsp tahini", "skimmed milk powder 8.7%"). */
 export function scanIngredient(line: string, kind: "contains" | "may_contain" = "contains"): Hit[] {
   // A claim ("Contains no almonds.") belongs to its own sentence: it must not downgrade a hit in the one before it.
   const sentences = line.split(/(?<=[.!?])\s+(?=\S)/);
   if (sentences.length > 1) return dedupe(sentences.flatMap((s) => scanIngredient(s, kind)));
-  const text = normalize(line);
+  const text = deglue(normalize(line));
   if (!text) return [];
   const hits: Hit[] = [];
   // An explicit "contains milk" or "(milk)" in the same item keeps the flavour's food a definite hit.
@@ -75,12 +90,14 @@ export function scanIngredient(line: string, kind: "contains" | "may_contain" = 
   // "lactose free milk" is still milk.
   // Also "not from milk", "not derived from milk", "contains no nuts", and the same word in other languages ("sans gluten", "ohne ei").
   const claimed = [...text.matchAll(/\b(?:([a-z]+) free(?! range| (?:from|of)\b)|free (?:from|of) ([a-z]+)|not (?:derived |made )?from ([a-z]+)|(?:sans|sin|senza|ohne|uten|zonder) ([a-z]+)|contains? no ([a-z]+)|(?:does not|do not|doesn t|don t) contain ([a-z]+))\b/g)].map((m) => m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5] ?? m[6]).filter((w) => w !== "lactose");
-  const freeFrom = new Set(resolveAllergies(claimed).ids);
+  // "wheat free" names wheat, not every gluten grain: barley and rye stay gluten ("wheat" resolves to wheat and gluten for a person's list, not here).
+  const freeFrom = new Set(claimed.flatMap((w) => (w === "wheat" ? ["wheat" as AllergenId] : resolveAllergies([w]).ids)));
   // "dairy free chocolate (contains milk)": an explicit "contains X" in the same item beats the free-from wording.
   const explicit = new Set([...text.matchAll(/(?<!\b(?:not|may|might|t) )\bcontains? (?!no\b)((?:[a-z]+ ?){1,4})/g)].flatMap((m) => resolveAllergies(m[1].trim().split(" ")).ids));
   return dedupe(hits.map((h) => (h.kind === "contains" && freeFrom.has(h.allergen) && !explicit.has(h.allergen) ? { ...h, kind: "possible" as const } : h)));
 }
 
+const TERM_WORDS = new Set(TERMS.flatMap((t) => [...t.terms, ...(t.unless ?? [])]).flatMap((t) => normalize(t).split(" ")));
 const KNOWN = new Set([...PLAIN_FOODS, ...FILLER_WORDS].map((w) => normalize(w)));
 const FILLER = new Set(FILLER_WORDS.map((w) => normalize(w)));
 const PHRASES = TERMS.flatMap((t) => [...t.terms, ...(t.unless ?? [])])
@@ -164,6 +181,8 @@ const FOREIGN_PRECAUTION = new RegExp(`^(?:${PRECAUTION_FOREIGN.join("|")})`, "i
 
 // "Not suitable for Nut, Peanut and Sesame allergy sufferers.", "It may not be suitable for those with peanut allergy.", "Allergy advice: Not suitable for customers with an allergy to soya.": a sentence of its own (or the text after an allergy-advice label), only a precaution when it speaks of allergy.
 const NOT_SUITABLE = /(?<=^|[.\n]\s*|\ballerg(?:y|en|ens|ic) (?:advice|information|warning|note)\s*:\s*)(?:(?:(?:it|this|this product|the product) )?(?:may|might) not be suitable|not suitable|unsuitable) for\b(?=(?:[^.\n]|\.(?!\s|$))*\ballerg(?:y|ic|ies)\b)/gi;
+// Words that only dress up a warning ("may contain traces of other nuts", "not suitable for nut allergy sufferers"): not an item to place.
+const WARNING_WORDS = /\b(?:trace amounts?|traces?|amounts?|other|following|all|any|products?|ingredients?|allerg(?:y|ies|ic|ens?)|sufferers?|customers?|people|persons?|anyone|those|who|are|is|handled|present|that|which|where|also|processe[sd]|handles|uses|manufactures|packs|produces|makes|cross contamination|contaminat(?:ed|ion))\b/gi;
 const SENTENCE_END = /\.(?=\s|$)|\n/;
 
 /** True for a sentence made only of allergen terms joined by spaces, commas, "and", "or", "&" ("egg peanuts and nuts"). */
@@ -289,6 +308,8 @@ export function checkProduct(product: OffProduct | null, people: Person[], looku
     const found = splitIngredients(w).flatMap((l) => scanIngredient(l, "may_contain"));
     hits.push(...found);
     if (!found.length && FOREIGN_PRECAUTION.test(w)) unreadWarning = true;
+    // An English warning is read word by word too: "may contain Brazilnuts" names something we can't place, which is not "nothing".
+    else if (!FOREIGN_PRECAUTION.test(w) && unrecognised(w.replace(PRECAUTION, " ").replace(NOT_SUITABLE, " ").replace(WARNING_WORDS, " ")).length) unreadWarning = true;
   }
   if (!english && enTags.length === 0) {
     dataIssues.push(
@@ -306,7 +327,7 @@ export function checkProduct(product: OffProduct | null, people: Person[], looku
 
 /** Turn hits into a verdict per person. Any data issue blocks a "no listed allergens" answer. */
 export function evaluate(hits: Hit[], people: Person[], dataIssues: string[] = []): CheckResult {
-  const templates = new Map<string, string>(); // name -> speech with NAME in place of the name
+  const templates = new Map<PersonResult, string>(); // result -> speech with NAME in place of the name (two people can share a name)
   const results = people.map((p): PersonResult => {
     const mine = hits.filter((h) => p.allergies.includes(h.allergen));
     const contains = mine.filter((h) => h.kind === "contains");
@@ -322,8 +343,9 @@ export function evaluate(hits: Hit[], people: Person[], dataIssues: string[] = [
     if (contains.length || mayContain.length) verdict = "unsafe";
     else if (possible.length || dataIssues.length) verdict = "cannot_confirm";
     const template = speak({ ...p, name: NAME }, verdict, contains, mayContain, possible, dataIssues);
-    templates.set(p.name, template);
-    return { name: p.name, verdict, reasons: unique(reasons), speech: template.replace(NAME, p.name) };
+    const result: PersonResult = { name: p.name, verdict, reasons: unique(reasons), speech: template.replace(NAME, p.name) };
+    templates.set(result, template);
+    return result;
   });
   const overall = results.reduce<Verdict>((v, r) => worst(v, r.verdict), "no_listed_allergens");
   const ordered = [...results].sort((a, b) => RANK[b.verdict] - RANK[a.verdict]);
@@ -362,10 +384,10 @@ function speak(p: Person, verdict: Verdict, contains: Hit[], may: Hit[], possibl
 
 // People who would hear the same sentence share it: "…OK for Maya and Leo: …", said once.
 const NAME = "\u0000";
-function merged(ordered: PersonResult[], templates: Map<string, string>): string {
+function merged(ordered: PersonResult[], templates: Map<PersonResult, string>): string {
   const groups = new Map<string, string[]>();
   for (const r of ordered) {
-    const t = templates.get(r.name) ?? r.speech;
+    const t = templates.get(r)!;
     groups.set(t, [...(groups.get(t) ?? []), r.name]);
   }
   return [...groups].map(([t, names]) => t.replace(NAME, join(names))).join(" ");

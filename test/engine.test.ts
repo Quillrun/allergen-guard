@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ALL_ALLERGENS, SWAP_OPTIONS, checkIngredients, checkProduct, resolveAllergies, scanIngredient, suggestSwaps } from "../src/index.ts";
+import { ALLERGENS, ALL_ALLERGENS, SWAP_OPTIONS, checkIngredients, checkProduct, resolveAllergies, scanIngredient, suggestSwaps } from "../src/index.ts";
 import { unrecognised } from "../src/engine.ts";
 import type { AllergenId, Person } from "../src/index.ts";
 
@@ -20,13 +20,29 @@ const MUST_NOT_PASS: [string, AllergenId][] = [
   ["king prawns", "crustacean"], ["shellfish stock", "mollusc"], ["oyster sauce", "mollusc"],
   ["1 Stick Celery", "celery"], ["chicken stock", "celery"], ["dijon", "mustard"], ["lupin flour", "lupin"], ["red wine", "sulphites"],
   ["curry paste", "peanut"], ["dark chocolate", "milk"], ["granola", "tree_nut"], ["BBQ sauce", "mustard"],
+  // Glued spellings, as they come out of real label text.
+  ["brazilnuts", "tree_nut"], ["pinenuts", "tree_nut"], ["cashewnuts", "tree_nut"], ["macadamianut", "tree_nut"], ["pistachionut", "tree_nut"], ["almondmilk", "tree_nut"], ["pecannuts", "tree_nut"], ["walnutoil", "tree_nut"],
+  ["peanutbutter", "peanut"], ["peanutoil", "peanut"], ["milkpowder", "milk"], ["skimmedmilk", "milk"], ["wholemilk", "milk"], ["milkprotein", "milk"], ["creamcheese", "milk"], ["lactoferrin", "milk"],
+  ["sesameseeds", "sesame"], ["sesameoil", "sesame"], ["mustardseed", "mustard"], ["soyflour", "soy"], ["soyprotein", "soy"], ["soysauce", "soy"], ["wheatprotein", "wheat"], ["wheatflour", "wheat"], ["wheatbran", "gluten"],
+  ["ryeflour", "gluten"], ["barleymalt", "gluten"], ["eggyolk", "egg"], ["eggwhite", "egg"], ["fishsauce", "fish"], ["shrimppaste", "crustacean"],
   ["amaretto", "tree_nut"], ["amaretti biscuits", "tree_nut"], ["macarons", "tree_nut"], ["baklava", "tree_nut"], ["romesco sauce", "tree_nut"], ["rye bread", "wheat"], ["rye bread", "gluten"],
 ];
 
 test("dangerous ingredients never come back as 'no listed allergens'", () => {
   for (const [ingredient, allergen] of MUST_NOT_PASS) {
     assert.notEqual(verdict(ingredient, allergen), "no_listed_allergens", `${ingredient} passed for ${allergen}`);
+    // The product entry point reads the same list as a label would give it, and must agree.
+    assert.notEqual(checkProduct({ ingredients_text_en: `water, ${ingredient}` }, [person("X", allergen)]).overall, "no_listed_allergens", `${ingredient} passed as a product for ${allergen}`);
   }
+});
+
+test("engine: a glued spelling means the same as the spaced one, and a plain word is not split", () => {
+  const kinds = (s: string) => JSON.stringify(scanIngredient(s).map((h) => `${h.allergen}:${h.kind}`).sort());
+  for (const [glued, spaced] of [["brazilnuts", "brazil nuts"], ["pinenuts", "pine nuts"], ["milkpowder", "milk powder"], ["sesameseeds", "sesame seeds"], ["peanutbutter", "peanut butter"]]) {
+    assert.equal(kinds(glued), kinds(spaced), glued);
+    assert.notEqual(kinds(glued), "[]", glued);
+  }
+  for (const word of ["butterfly", "coconutmilk", "cornflour", "sunflower", "pineapple", "seaweed"]) assert.equal(kinds(word).includes("milk:contains") || kinds(word).includes("tree_nut:contains"), false, word);
 });
 
 test("look-alikes are not flagged", () => {
@@ -70,7 +86,6 @@ test("lasagne: per-person verdicts and a household-aware swap list", () => {
   assert.deepEqual(swaps.map((s) => s.replace), ["1 Stick Celery", "400ml Creme Fraiche", "125g Mozzarella Balls", "50g Parmesan Cheese"]);
   const mozzarella = swaps.find((s) => s.replace.includes("Mozzarella"));
   // Dairy-free cheese is often cashew-based; Maya can't have tree nuts, so it must not be offered.
-  assert.ok(mozzarella?.options.every((o) => !/dairy-free cheese/.test(o)));
   assert.deepEqual(mozzarella?.options, ["Leave it out (no swap fits everyone)"]);
 });
 
@@ -596,8 +611,7 @@ test("precaution: 'not suitable for … allergy sufferers' is one precaution sen
   for (const a of ["tree_nut", "peanut", "sesame"] as AllergenId[]) { assert.ok(labelKinds(t, a).includes("may_contain"), a); assert.ok(!labelKinds(t, a).includes("contains"), a); }
   assert.ok(labelKinds("Rice. Unsuitable for those with a sesame allergy.", "sesame").includes("may_contain"));
   assert.ok(!labelKinds("Rice. Unsuitable for those with a sesame allergy.", "sesame").includes("contains"));
-  assert.ok(labelKinds("Flour, sesame. Not suitable for vegetarians.", "sesame").includes("contains"));
-  assert.ok(labelKinds("Flour, sesame. Not suitable for vegetarians.", "sesame").length === 1);
+  assert.deepEqual(labelKinds("Flour, sesame. Not suitable for vegetarians.", "sesame"), ["contains"]);
   // the sentence ends at its full stop: what follows stays an ingredient
   assert.ok(labelKinds("Not suitable for nut allergy sufferers. Sesame, salt.", "sesame").includes("contains"));
 });
@@ -948,4 +962,77 @@ test("'Processed in a factory handling peanuts' is a may-contain warning even af
   // Tree-nut person: only the warning names tree nuts, and it is labelled "may contain".
   const r = checkProduct({ product_name: "X", ingredients_text_en: "sugar. Contains peanuts: Processed in a factory handling nuts" }, [person("Leo", "tree_nut")]);
   assert.deepEqual(r.people[0].reasons, ["May contain tree nuts"]);
+});
+
+test("engine: an English warning naming a word we can't place is a data issue, never 'none listed'", () => {
+  const nut = [person("X", "tree_nut")];
+  for (const text of ["water, salt (may contain Brazilnuts)", "flour. This product may contain pinenuts", "water. May contain traces of xylitol", "water. Made in a factory that handles ashwagandha"]) {
+    const r = checkProduct({ ingredients_text_en: text }, [person("X", "milk")]);
+    assert.equal(r.overall, "cannot_confirm", text);
+    assert.match(r.dataIssues.join(" "), /can't read it/, text);
+  }
+  // The word it can place still counts in full.
+  assert.equal(checkProduct({ ingredients_text_en: "water. May contain traces of pinenuts and walnuts" }, nut).overall, "unsafe");
+  // Ordinary wording around known allergens is not an unread warning.
+  for (const text of [
+    "water. May contain traces of nuts, peanuts and sesame seeds", "water. May contain trace amounts of milk", "water. Made on equipment that also processes wheat",
+    "water. Not suitable for nut and peanut allergy sufferers", "water. May also contain other cereals containing gluten", "water. Produced in a factory which also handles peanuts, tree nuts and milk",
+    "water. May contain one or more of the following: celery, mustard", "water (may contain egg, milk, soy)",
+  ]) assert.equal(checkProduct({ ingredients_text_en: text }, [person("X", "lupin")]).overall, "no_listed_allergens", text);
+});
+
+test("engine: a 'wheat free' claim covers wheat only, so barley and malt stay gluten", () => {
+  const kinds = (s: string) => Object.fromEntries(scanIngredient(s).map((h) => [h.allergen, h.kind]));
+  assert.equal(kinds("wheat free barley malt extract").gluten, "contains");
+  assert.equal(kinds("wheat free rye bread").gluten, "contains");
+  assert.equal(kinds("wheat free bread").wheat, "possible"); // the claim still weakens wheat
+  assert.equal(kinds("gluten free bread").gluten, "possible"); // and a gluten-free claim still weakens gluten
+  assert.equal(verdict("wheat free barley malt extract", "gluten"), "unsafe");
+});
+
+test("swaps: an option must fix every flagged term of the line, or the answer is to leave it out", () => {
+  const optionsFor = (line: string, ...allergies: AllergenId[]) => {
+    const people = [person("X", ...allergies)];
+    return suggestSwaps(checkIngredients([line], people).lines, people)[0].options;
+  };
+  // 'cookie' (wheat) has no swap, so a peanut swap would leave the wheat in the line.
+  assert.deepEqual(optionsFor("2 tbsp peanut butter cookies", "peanut", "wheat"), ["Leave it out (no swap fits everyone)"]);
+  // Two terms with swaps: only an option offered for both is kept.
+  assert.deepEqual(optionsFor("peanut and tahini sauce", "peanut", "sesame"), ["sunflower seed butter"]);
+  // One term keeps all its swaps.
+  assert.deepEqual(optionsFor("peanut butter", "peanut"), ["sunflower seed butter", "toasted pumpkin seeds"]);
+  assert.deepEqual(optionsFor("a pinch of unobtainium and peanut", "peanut", "wheat"), ["sunflower seed butter", "toasted pumpkin seeds"]);
+});
+
+test("engine: two people with the same name each get their own spoken answer", () => {
+  const sams = [person("Sam", "milk"), person("Sam", "peanut")];
+  for (const people of [sams, [...sams].reverse()]) {
+    const r = checkIngredients(["1 cup milk"], people);
+    assert.equal(r.overall, "unsafe");
+    assert.match(r.speech, /should avoid this: it contains milk/);
+    assert.match(r.speech, /Nothing listed for Sam's allergies/);
+    assert.equal(r.people.filter((p) => p.verdict === "unsafe").length, 1);
+  }
+});
+
+test("never says 'safe': no speech, reason, data issue, swap or label of the engine contains the word, in any verdict", () => {
+  const everyone = ALL_ALLERGENS.map((a) => person(a, a));
+  const group = [person("Maya", "peanut", "milk"), person("Leo", "gluten"), person("Sam", "sesame"), person("Ana", "fish")];
+  const results = [
+    ...[["tomato", "basil"], ["peanuts", "milk"], ["korma paste"], ["mayonnaise"], ["—"], ["牛奶"], [], ["egg-free mayonnaise"], ["dairy free chocolate (contains milk)"], ["brazilnuts, wheat free barley malt"]]
+      .flatMap((lines) => [everyone, group, [person("X", "milk")], []].map((people) => checkIngredients(lines, people))),
+    ...[
+      null, {}, { code: "1" }, { ingredients_text_en: "water, salt" }, { ingredients_text_en: "water. May contain milk" }, { ingredients_text_en: "water. May contain traces of xylitol" },
+      { ingredients_text_en: "sugar, 牛奶" }, { ingredients_text: "lait, sucre" }, { ingredients_text_en: "-" }, { ingredients_tags: ["en:milk"] }, { ingredients_original_tags: ["fr:lait"] },
+      { allergens_tags: ["en:milk", "en:made-up"] }, { traces_tags: ["en:made-up"] }, { ingredients_text_en: "wheat flour", labels_tags: ["en:no-gluten"] }, { ingredients_text_en: "water", traces_tags: ["en:nuts"] },
+    ].flatMap((p) => [everyone, group, []].map((people) => checkProduct(p, people))),
+    checkProduct(null, group, "timeout"),
+  ];
+  assert.deepEqual([...new Set(results.map((r) => r.overall))].sort(), ["cannot_confirm", "no_listed_allergens", "unsafe"], "the sweep must cover every verdict");
+  const said = (r: ReturnType<typeof checkProduct>) => [r.speech, ...r.dataIssues, ...r.people.flatMap((p) => [p.speech, ...p.reasons])];
+  for (const r of results) for (const s of said(r)) assert.doesNotMatch(s, /\bsafe\b/i, s);
+  // Swaps and the catalogue's own labels are spoken too.
+  const swapUses = Object.values(SWAP_OPTIONS).flatMap((os) => os.map((o) => o.use));
+  const swapLines = results.flatMap((r) => ("lines" in r ? suggestSwaps((r as ReturnType<typeof checkIngredients>).lines, everyone) : []));
+  for (const s of [...swapUses, ...swapLines.flatMap((w) => [w.because, ...w.options]), ...Object.values(ALLERGENS).flatMap((a) => [a.label, a.spoken])]) assert.doesNotMatch(s, /\bsafe\b/i, s);
 });
